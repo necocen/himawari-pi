@@ -1,0 +1,4 @@
+#!/bin/bash
+
+docker run --rm -v "${PWD}:/rust" cargo-cross
+scp ./target/aarch64-unknown-linux-gnu/release/himawari-pi "$@"
