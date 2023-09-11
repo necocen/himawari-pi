@@ -40,6 +40,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    log::info!("Done");
+
     Ok(())
 }
 
