@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
+chrono = "0.4.30"
+chrono-tz = "0.8.3"
 env_logger = "0.10.0"
 headless_chrome = { version = "1.0.5", features = ["fetch", "rustls"] }
 log = "0.4.20"
