@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::Cursor,
     path::{Path, PathBuf},
 };
 
@@ -7,6 +8,7 @@ use anyhow::Context;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use chrono_tz::Asia::Tokyo;
 use headless_chrome::Browser;
+use image::imageops::FilterType;
 use reqwest::{
     header::{COOKIE, USER_AGENT},
     Client,
@@ -97,7 +99,7 @@ pub async fn get_image(download_info: &DownloadInfo) -> anyhow::Result<PathBuf> 
     params.insert("filelist[0]", &download_info.dl_path);
     params.insert("dl_path", &download_info.dl_path);
 
-    let mut resp = client
+    let resp = client
         .post("https://sc-nc-web.nict.go.jp/wsdb_osndisk/fileSearch/download")
         .form(&params)
         .header(COOKIE, format!("CAKEPHP={}", download_info.cakephp_cookie))
@@ -106,14 +108,16 @@ pub async fn get_image(download_info: &DownloadInfo) -> anyhow::Result<PathBuf> 
         .await?
         .error_for_status()?;
 
+    let mut buffer = Cursor::new(Vec::new());
+    let bytes = resp.bytes().await?;
+    image::load_from_memory(&bytes)?
+        .resize(1080, 1080, FilterType::Nearest)
+        .write_to(&mut buffer, image::ImageOutputFormat::Png)?;
     if fs::metadata(dir).await.is_err() {
         fs::create_dir(dir).await?;
     }
-
     let mut file = fs::File::create(&image_path).await?;
-    while let Some(chunk) = resp.chunk().await? {
-        file.write_all(&chunk).await?;
-    }
+    file.write_all(buffer.get_ref()).await?;
 
     log::info!("Image downloaded: {}", image_path.to_str().unwrap());
     Ok(image_path)
