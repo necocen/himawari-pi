@@ -1,23 +1,67 @@
-use std::{path::PathBuf, time::Duration};
-
-use iced::{
-    widget::{
-        image::{self, Handle},
-        Space,
-    },
-    window, Application, Command, Length,
+use std::{
+    fs::read_dir,
+    io::Cursor,
+    iter,
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
-use crate::himawari;
+use chrono::{DateTime, NaiveDateTime, Utc};
+use iced::{
+    widget::{image as iced_image, Space},
+    window, Application, Command, Length, Subscription,
+};
+use image::imageops::FilterType;
+use tokio::{fs, io::AsyncWriteExt};
+
+use crate::himawari::{self, DownloadInfo, Progress};
 
 pub struct App {
-    image: Option<image::Handle>,
+    images: Vec<Image>,
+    download: Option<Download>,
+    current_image: Option<(usize, iced_image::Handle)>,
+}
+
+#[derive(Debug)]
+pub struct Image {
+    path: PathBuf,
+    timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct Download {
+    info: DownloadInfo,
+    state: DownloadState,
+}
+
+impl Download {
+    fn new(info: DownloadInfo) -> Self {
+        Download {
+            info,
+            state: DownloadState::Starting,
+        }
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        himawari::download_subscription(&self.info)
+            .map(|(ts, p)| Message::DownloadProgressed(ts, p))
+    }
+}
+
+#[derive(Debug)]
+enum DownloadState {
+    Starting,
+    Downloading { progress: f32 },
+    Finished,
+    Failed(anyhow::Error),
 }
 
 #[derive(Debug)]
 pub enum Message {
-    Update,
-    Image(anyhow::Result<PathBuf>),
+    Fetch,
+    Download(DownloadInfo),
+    DownloadProgressed(DateTime<Utc>, Progress),
+    DownloadCompleted(Image),
 }
 
 impl Application for App {
@@ -27,11 +71,22 @@ impl Application for App {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, iced::Command<Self::Message>) {
+        // FIXME: ここが同期なのは不満がある
+        let images = Self::get_images();
+        let current_image = images
+            .iter()
+            .enumerate()
+            .last()
+            .map(|(i, image)| (i, iced_image::Handle::from_path(&image.path)));
         (
-            App { image: None },
+            App {
+                images,
+                download: None,
+                current_image,
+            },
             Command::batch(vec![
                 window::change_mode(window::Mode::Fullscreen),
-                Command::perform(App::update_image(), Message::Image),
+                Command::perform(async {}, |_| Message::Fetch),
             ]),
         )
     }
@@ -42,21 +97,77 @@ impl Application for App {
 
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
         match message {
-            Message::Update => Command::perform(App::update_image(), Message::Image),
-            Message::Image(Ok(path_buf)) => {
-                self.image = Some(Handle::from_path(path_buf));
+            Message::Fetch => {
+                Command::perform(himawari::fetch_download_info(), |result| match result {
+                    Ok(info) => Message::Download(info),
+                    Err(_) => todo!(),
+                })
+            }
+            Message::Download(info) => {
+                if let Some(image) = self
+                    .images
+                    .iter()
+                    .find(|image| image.timestamp == info.timestamp)
+                {
+                    log::debug!("Already downloaded: {}", image.path.display());
+                    return Command::none();
+                }
+                self.download = Some(Download::new(info));
                 Command::none()
             }
-            Message::Image(Err(e)) => {
-                log::error!("{e}");
+            Message::DownloadProgressed(_, Progress::Started) => {
+                self.download.as_mut().unwrap().state =
+                    DownloadState::Downloading { progress: 0.0 };
+                Command::none()
+            }
+            Message::DownloadProgressed(_, Progress::Advanced(progress)) => {
+                self.download.as_mut().unwrap().state = DownloadState::Downloading { progress };
+                Command::none()
+            }
+            Message::DownloadProgressed(_, Progress::Failed(e)) => {
+                log::error!("failed to download image: {e}");
+                self.download.as_mut().unwrap().state = DownloadState::Failed(e);
+                Command::none()
+            }
+            Message::DownloadProgressed(timestamp, Progress::Finished(data)) => {
+                self.download.as_mut().unwrap().state = DownloadState::Finished;
+                Command::perform(
+                    App::resize_and_save_image(timestamp, data),
+                    |result| match result {
+                        Ok(image) => Message::DownloadCompleted(image),
+                        Err(_) => todo!(),
+                    },
+                )
+            }
+            Message::DownloadCompleted(image) => {
+                self.download = None;
+                self.images.push(image);
+                if let Some((i, _)) = self.current_image {
+                    // current_imageが最新の画像だったら新しい画像に追従する
+                    if i == self.images.len() - 2 {
+                        self.current_image = self
+                            .images
+                            .iter()
+                            .enumerate()
+                            .last()
+                            .map(|(i, image)| (i, iced_image::Handle::from_path(&image.path)));
+                    }
+                } else {
+                    self.current_image = self
+                        .images
+                        .iter()
+                        .enumerate()
+                        .last()
+                        .map(|(i, image)| (i, iced_image::Handle::from_path(&image.path)));
+                }
                 Command::none()
             }
         }
     }
 
     fn view(&self) -> iced::Element<Message> {
-        if let Some(handle) = &self.image {
-            image::Image::new(handle.clone())
+        if let Some((_, handle)) = &self.current_image {
+            iced_image::Image::new(handle.clone())
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -66,13 +177,85 @@ impl Application for App {
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
-        iced::time::every(Duration::from_secs(300)).map(|_| Message::Update)
+        let fetch = iter::once(iced::time::every(Duration::from_secs(300)).map(|_| Message::Fetch));
+        let progress = self
+            .download
+            .as_ref()
+            .map(Download::subscription)
+            .into_iter();
+
+        Subscription::batch(progress.chain(fetch))
     }
 }
 
 impl App {
-    async fn update_image() -> anyhow::Result<PathBuf> {
-        let info = himawari::fetch_download_info().await?;
-        himawari::get_image(&info).await
+    const IMAGE_DIR: &'static str = "./images";
+
+    fn get_images() -> Vec<Image> {
+        match read_dir(Self::IMAGE_DIR) {
+            Ok(paths) => {
+                let mut images = paths
+                    .filter_map(|path| {
+                        let path = path.ok()?.path();
+                        let file_name = path.file_name()?.to_str()?;
+                        let Ok(timestamp) =
+                            NaiveDateTime::parse_from_str(file_name, "%Y%m%d%H%M%S.png")
+                        else {
+                            log::warn!("unexpected filename: {file_name}");
+                            return None;
+                        };
+                        let timestamp = timestamp.and_utc();
+                        Some(Image { path, timestamp })
+                    })
+                    .collect::<Vec<_>>();
+                images.sort_by(|i1, i2| i1.timestamp.cmp(&i2.timestamp));
+                images
+            }
+            Err(e) => {
+                log::error!("{e}");
+                vec![]
+            }
+        }
+    }
+
+    async fn resize_and_save_image(
+        timestamp: DateTime<Utc>,
+        data: Vec<u8>,
+    ) -> anyhow::Result<Image> {
+        let data = Self::resize_image(data).await?;
+        Self::save_image(timestamp, data).await
+    }
+
+    async fn resize_image(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+        let task = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+            log::info!("Resizing image");
+            let mut buffer = Cursor::new(Vec::new());
+            image::load_from_memory(&data)?
+                .resize(1080, 1080, FilterType::Nearest)
+                .write_to(&mut buffer, image::ImageOutputFormat::Png)?;
+            log::info!("Resized image");
+            Ok(buffer.into_inner())
+        });
+        task.await?
+    }
+
+    async fn save_image(timestamp: DateTime<Utc>, data: Vec<u8>) -> anyhow::Result<Image> {
+        let image_path = Path::new(&format!(
+            "{}/{}.png",
+            App::IMAGE_DIR,
+            timestamp.format("%Y%m%d%H%M%S")
+        ))
+        .to_path_buf();
+        if fs::metadata(App::IMAGE_DIR).await.is_err() {
+            fs::create_dir(App::IMAGE_DIR).await?;
+        }
+        let mut file = fs::File::create(&image_path).await?;
+        file.write_all(&data).await?;
+
+        log::info!("Image saved: {}", image_path.display());
+        Ok(Image {
+            path: image_path,
+            timestamp,
+        })
     }
 }
