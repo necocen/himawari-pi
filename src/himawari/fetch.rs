@@ -14,25 +14,31 @@ pub async fn fetch_download_info() -> anyhow::Result<DownloadInfo> {
         // 検索の完了を待つ
         _ = tab.wait_for_element("div#search_btn.enabled")?;
 
-        // FIXME: attributesの順番が変わると壊れるのでちゃんとする
         // 最新のファイル名を取得
         let attrs = tab
             .wait_for_element("table#data_im_table tbody tr:first-child")?
             .get_attributes()?
             .expect("expected attributes");
-        let dl_path = attrs[7].clone();
+        let dl_path = find_attribute(&attrs, "data-fpath")
+            .with_context(|| "failed to get dl_path")?
+            .clone();
         // 観測日時を取得
-        let timestamp = NaiveDateTime::parse_from_str(&attrs[9], "%Y/%m/%d %H:%M:%S")?
-            .and_local_timezone(Tokyo)
-            .single()
-            .with_context(|| "failed to apply Asia/Tokyo timezone to given time")?
-            .with_timezone(&Utc);
+        let timestamp = NaiveDateTime::parse_from_str(
+            find_attribute(&attrs, "data-optime").with_context(|| "failed to get timestamp")?,
+            "%Y/%m/%d %H:%M:%S",
+        )?
+        .and_local_timezone(Tokyo)
+        .single()
+        .with_context(|| "failed to apply Asia/Tokyo timezone to given time")?
+        .with_timezone(&Utc);
         // トークンを取得
         let attrs = tab
             .wait_for_element("input#fixedToken")?
             .get_attributes()?
             .expect("expected attributes");
-        let token = attrs[7].clone();
+        let token = find_attribute(&attrs, "value")
+            .with_context(|| "failed to get token")?
+            .clone();
         let cookies = tab.get_cookies()?;
         // CAKEPHPのセッションID(?)を取得
         let cakephp_cookie = cookies
@@ -54,4 +60,41 @@ pub async fn fetch_download_info() -> anyhow::Result<DownloadInfo> {
         })
     });
     task.await?
+}
+
+fn find_attribute<'a>(attrs: &'a [String], name: &str) -> Option<&'a String> {
+    let mut iter = attrs.iter();
+    while let Some(attr) = iter.next() {
+        if attr == name {
+            return iter.next();
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_attribute;
+
+    #[test]
+    fn test_find_attribute() {
+        let attrs = vec![
+            "attr".to_string(),
+            "value".to_string(),
+            "attr2".to_string(),
+            "value2".to_string(),
+            "attr3".to_string(),
+            "value3".to_string(),
+        ];
+        assert_eq!(find_attribute(&attrs, "attr"), Some(&"value".to_string()));
+        assert_eq!(find_attribute(&attrs, "attr2"), Some(&"value2".to_string()));
+        assert_eq!(find_attribute(&attrs, "attr3"), Some(&"value3".to_string()));
+        assert_eq!(find_attribute(&attrs, "attr4"), None);
+    }
+
+    #[test]
+    fn test_find_attribute_in_malformed_input() {
+        let attrs = vec!["attr".to_string(), "value".to_string(), "attr2".to_string()];
+        assert_eq!(find_attribute(&attrs, "attr2"), None);
+    }
 }
