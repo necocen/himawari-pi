@@ -3,29 +3,51 @@ use std::{
     io::Cursor,
     iter,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use iced::{
-    widget::{image as iced_image, Space},
-    window, Application, Command, Length, Subscription,
+    theme,
+    widget::{
+        button, column, container, horizontal_space, image as iced_image, pick_list, row,
+        scrollable, text, Column, Space,
+    },
+    window, Application, Color, Command, Element, Length, Subscription,
 };
 use image::imageops::FilterType;
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::himawari::{self, DownloadInfo, Progress};
+use crate::{
+    himawari::{self, DownloadInfo, Progress},
+    modal::Modal,
+};
 
 pub struct App {
     images: Vec<Image>,
     download: Option<Download>,
     current_image: Option<(usize, iced_image::Handle)>,
+    shows_menu: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Image {
     path: PathBuf,
     timestamp: DateTime<Utc>,
+}
+
+impl Image {
+    fn view(&self) -> Element<Message> {
+        let timestamp = self
+            .timestamp
+            .with_timezone(&chrono_tz::Asia::Tokyo)
+            .format("%Y-%m-%d %H:%M");
+        button(text(timestamp).size(30))
+            .on_press(Message::SelectImage(self.clone()))
+            .style(theme::Button::Text)
+            .into()
+    }
 }
 
 #[derive(Debug)]
@@ -53,15 +75,18 @@ enum DownloadState {
     Starting,
     Downloading { progress: f32 },
     Finished,
-    Failed(anyhow::Error),
+    Failed(Arc<anyhow::Error>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Message {
     Fetch,
     Download(DownloadInfo),
     DownloadProgressed(DateTime<Utc>, Progress),
     DownloadCompleted(Image),
+    ShowMenu,
+    HideMenu,
+    SelectImage(Image),
 }
 
 impl Application for App {
@@ -83,6 +108,7 @@ impl Application for App {
                 images,
                 download: None,
                 current_image,
+                shows_menu: false,
             },
             Command::batch(vec![
                 window::change_mode(window::Mode::Fullscreen),
@@ -97,10 +123,31 @@ impl Application for App {
 
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
         match message {
+            Message::ShowMenu => {
+                self.shows_menu = true;
+                Command::none()
+            }
+            Message::HideMenu => {
+                self.shows_menu = false;
+                Command::none()
+            }
+            Message::SelectImage(image) => {
+                self.current_image = self
+                    .images
+                    .iter()
+                    .enumerate()
+                    .find(|(_, img)| img.timestamp == image.timestamp)
+                    .map(|(i, image)| (i, iced_image::Handle::from_path(&image.path)));
+                Command::none()
+            }
             Message::Fetch => {
                 Command::perform(himawari::fetch_download_info(), |result| match result {
                     Ok(info) => Message::Download(info),
-                    Err(_) => todo!(),
+                    Err(e) => {
+                        // TODO: 「無」のMessageを定義すべきなのか？
+                        log::error!("{e}");
+                        panic!("{e}")
+                    }
                 })
             }
             Message::Download(info) => {
@@ -135,7 +182,7 @@ impl Application for App {
                     App::resize_and_save_image(timestamp, data),
                     |result| match result {
                         Ok(image) => Message::DownloadCompleted(image),
-                        Err(_) => todo!(),
+                        Err(e) => panic!("{e}"),
                     },
                 )
             }
@@ -166,13 +213,41 @@ impl Application for App {
     }
 
     fn view(&self) -> iced::Element<Message> {
-        if let Some((_, handle)) = &self.current_image {
-            iced_image::Image::new(handle.clone())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+        let Some((_, handle)) = &self.current_image else {
+            return Space::new(Length::Fill, Length::Fill).into();
+        };
+        let content = iced_image::Image::new(handle.clone())
+            .width(Length::Fill)
+            .height(Length::Fill);
+        let content = button(content)
+            .on_press(Message::ShowMenu)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(0)
+            .style(theme::Button::Text);
+        let images = scrollable(
+            Column::with_children(self.images.iter().rev().map(Image::view).collect()).spacing(10),
+        )
+        .width(Length::Fill)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Properties::new().width(50).scroller_width(50),
+        ))
+        .height(300);
+        let modal = container(
+            column![
+                text("Sign Up").size(24),
+                column![images, button("Close").on_press(Message::HideMenu),].spacing(10)
+            ]
+            .spacing(20),
+        )
+        .width(700)
+        .padding(10)
+        .style(theme::Container::Transparent);
+
+        if self.shows_menu {
+            Modal::new(content, modal).into()
         } else {
-            Space::new(Length::Fill, Length::Fill).into()
+            content.into()
         }
     }
 
@@ -185,6 +260,10 @@ impl Application for App {
             .into_iter();
 
         Subscription::batch(progress.chain(fetch))
+    }
+
+    fn theme(&self) -> Self::Theme {
+        iced::Theme::Dark
     }
 }
 

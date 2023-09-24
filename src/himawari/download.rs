@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
@@ -42,13 +42,13 @@ async fn download(timestamp: DateTime<Utc>, state: State) -> ((DateTime<Utc>, Pr
                         (
                             (
                                 timestamp,
-                                Progress::Failed(anyhow!("failed to get content length")),
+                                Progress::Failed(Arc::new(anyhow!("failed to get content length"))),
                             ),
                             State::Finished,
                         )
                     }
                 }
-                Err(e) => ((timestamp, Progress::Failed(e)), State::Finished),
+                Err(e) => ((timestamp, Progress::Failed(Arc::new(e))), State::Finished),
             }
         }
         State::Downloading {
@@ -76,7 +76,10 @@ async fn download(timestamp: DateTime<Utc>, state: State) -> ((DateTime<Utc>, Pr
                 log::info!("Download finished");
                 ((timestamp, Progress::Finished(data)), State::Finished)
             }
-            Err(e) => ((timestamp, Progress::Failed(e.into())), State::Finished),
+            Err(e) => (
+                (timestamp, Progress::Failed(Arc::new(e.into()))),
+                State::Finished,
+            ),
         },
         State::Finished => {
             // ここで停止
@@ -108,12 +111,12 @@ async fn get_response(download_info: &DownloadInfo) -> anyhow::Result<Response> 
     Ok(response)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Progress {
     Started,
     Advanced(f32),
     Finished(Vec<u8>),
-    Failed(anyhow::Error),
+    Failed(Arc<anyhow::Error>),
 }
 
 enum State {
