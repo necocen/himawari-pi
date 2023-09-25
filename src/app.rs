@@ -16,7 +16,10 @@ use iced::{
     },
     window, Application, Color, Command, Element, Length, Subscription,
 };
-use image::imageops::FilterType;
+use image::{
+    imageops::{self, FilterType},
+    DynamicImage, RgbImage,
+};
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::{
@@ -299,21 +302,43 @@ impl App {
 
     async fn resize_and_save_image(
         timestamp: DateTime<Utc>,
-        data: Vec<u8>,
+        [[data00, data01], [data10, data11]]: [[Vec<u8>; 2]; 2],
     ) -> anyhow::Result<Image> {
-        let data = Self::resize_image(data).await?;
-        Self::save_image(timestamp, data).await
+        let top_left = Self::resize_image(data00);
+        let bottom_left = Self::resize_image(data01);
+        let top_right = Self::resize_image(data10);
+        let bottom_right = Self::resize_image(data11);
+        let (top_left, bottom_left, top_right, bottom_right) =
+            tokio::try_join!(top_left, bottom_left, top_right, bottom_right)?;
+        let mut combined = RgbImage::new(1080, 1080);
+        imageops::replace(&mut combined, &top_left.to_rgb8(), 0, 0);
+        imageops::replace(&mut combined, &bottom_left.to_rgb8(), 0, 540);
+        imageops::replace(&mut combined, &top_right.to_rgb8(), 540, 0);
+        imageops::replace(&mut combined, &bottom_right.to_rgb8(), 540, 540);
+
+        let image_path = Path::new(&format!(
+            "{}/{}.png",
+            App::IMAGE_DIR,
+            timestamp.format("%Y%m%d%H%M%S")
+        ))
+        .to_path_buf();
+        if fs::metadata(App::IMAGE_DIR).await.is_err() {
+            fs::create_dir(App::IMAGE_DIR).await?;
+        }
+        combined.save(&image_path)?;
+        log::info!("Image saved: {}", image_path.display());
+        Ok(Image {
+            path: image_path,
+            timestamp,
+        })
     }
 
-    async fn resize_image(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let task = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+    async fn resize_image(data: Vec<u8>) -> anyhow::Result<DynamicImage> {
+        let task = tokio::task::spawn_blocking(move || -> anyhow::Result<DynamicImage> {
             log::info!("Resizing image");
-            let mut buffer = Cursor::new(Vec::new());
-            image::load_from_memory(&data)?
-                .resize(1080, 1080, FilterType::Nearest)
-                .write_to(&mut buffer, image::ImageOutputFormat::Png)?;
+            let image = image::load_from_memory(&data)?.resize(540, 540, FilterType::Lanczos3);
             log::info!("Resized image");
-            Ok(buffer.into_inner())
+            Ok(image)
         });
         task.await?
     }
