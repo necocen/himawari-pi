@@ -1,9 +1,9 @@
 use std::{future::Future, sync::Arc};
 
-use anyhow::anyhow;
+use anyhow::Context as _;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::future::Either;
+use futures::future::{try_join_all, Either};
 use iced::{subscription, Subscription};
 use reqwest::{Client, Response};
 use tokio::select;
@@ -24,109 +24,17 @@ pub fn download_subscription(
 async fn download(timestamp: DateTime<Utc>, state: State) -> ((DateTime<Utc>, Progress), State) {
     match state {
         State::Ready(download_info) => {
-            let url = download_info
-                .timestamp
-                .format("https://himawari8.nict.go.jp/img/D531106/2d/550/%Y/%m/%d/%H%M%S")
-                .to_string();
-            let client = Client::new();
-            let Ok(res00) = client.get(url.clone() + "_0_0.png").send().await else {
-                return (
-                    (timestamp, Progress::Failed(Arc::new(anyhow!("fail 00")))),
-                    State::Finished,
-                );
-            };
-            let Ok(res01) = client.get(url.clone() + "_0_1.png").send().await else {
-                return (
-                    (timestamp, Progress::Failed(Arc::new(anyhow!("fail 01")))),
-                    State::Finished,
-                );
-            };
-            let Ok(res10) = client.get(url.clone() + "_1_0.png").send().await else {
-                return (
-                    (timestamp, Progress::Failed(Arc::new(anyhow!("fail 10")))),
-                    State::Finished,
-                );
-            };
-            let Ok(res11) = client.get(url + "_1_1.png").send().await else {
-                return (
-                    (timestamp, Progress::Failed(Arc::new(anyhow!("fail 11")))),
-                    State::Finished,
-                );
-            };
-            let Some(total00) = res00.content_length() else {
-                return (
-                    (
-                        timestamp,
-                        Progress::Failed(Arc::new(anyhow!("failed to get content length"))),
-                    ),
-                    State::Finished,
-                );
-            };
-            let Some(total01) = res01.content_length() else {
-                return (
-                    (
-                        timestamp,
-                        Progress::Failed(Arc::new(anyhow!("failed to get content length"))),
-                    ),
-                    State::Finished,
-                );
-            };
-            let Some(total10) = res10.content_length() else {
-                return (
-                    (
-                        timestamp,
-                        Progress::Failed(Arc::new(anyhow!("failed to get content length"))),
-                    ),
-                    State::Finished,
-                );
-            };
-            let Some(total11) = res11.content_length() else {
-                return (
-                    (
-                        timestamp,
-                        Progress::Failed(Arc::new(anyhow!("failed to get content length"))),
-                    ),
-                    State::Finished,
-                );
+            let [item00, item01, item10, item11] = match get_download_items(&download_info).await {
+                Ok(items) => items,
+                Err(e) => {
+                    return ((timestamp, Progress::Failed(Arc::new(e))), State::Finished);
+                }
             };
             log::info!("Start downloading");
             (
                 (timestamp, Progress::Started),
                 State::Downloading {
-                    items: [
-                        [
-                            DownloadItem {
-                                response: res00,
-                                total: total00,
-                                downloaded: 0,
-                                data: Vec::with_capacity(total00 as usize),
-                                is_finished: false,
-                            },
-                            DownloadItem {
-                                response: res01,
-                                total: total01,
-                                downloaded: 0,
-                                data: Vec::with_capacity(total01 as usize),
-                                is_finished: false,
-                            },
-                        ],
-                        [
-                            DownloadItem {
-                                response: res10,
-                                total: total10,
-                                downloaded: 0,
-                                data: Vec::with_capacity(total10 as usize),
-                                is_finished: false,
-                            },
-                            DownloadItem {
-                                response: res11,
-                                total: total11,
-                                downloaded: 0,
-                                data: Vec::with_capacity(total11 as usize),
-                                is_finished: false,
-                            },
-                        ],
-                    ],
+                    items: [[item00, item01], [item10, item11]],
                 },
             )
         }
@@ -261,6 +169,7 @@ enum State {
     Finished,
 }
 
+#[derive(Debug)]
 struct DownloadItem {
     response: Response,
     total: u64,
@@ -283,4 +192,35 @@ impl DownloadItem {
             Either::Right(self.response.chunk())
         }
     }
+}
+
+async fn get_download_items(download_info: &DownloadInfo) -> anyhow::Result<[DownloadItem; 4]> {
+    let client = Client::new();
+    let url = download_info
+        .timestamp
+        .format("https://himawari8.nict.go.jp/img/D531106/2d/550/%Y/%m/%d/%H%M%S")
+        .to_string();
+    let urls = [
+        format!("{url}_0_0.png"),
+        format!("{url}_0_1.png"),
+        format!("{url}_1_0.png"),
+        format!("{url}_1_1.png"),
+    ];
+    let futures = urls.map(|u| client.get(u).send());
+    let responses = try_join_all(futures).await?;
+    let items = responses
+        .into_iter()
+        .map(|response| {
+            response.content_length().map(|total| DownloadItem {
+                response,
+                total,
+                downloaded: 0,
+                data: Vec::with_capacity(total as usize),
+                is_finished: false,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|vec| vec.try_into().unwrap())
+        .with_context(|| "failed to get content_length")?;
+    Ok(items)
 }
