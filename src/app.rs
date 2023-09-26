@@ -302,7 +302,7 @@ impl App {
 
     async fn resize_and_save_image(
         timestamp: DateTime<Utc>,
-        [[data00, data01], [data10, data11]]: [[Vec<u8>; 2]; 2],
+        [data00, data01, data10, data11]: [Vec<u8>; 4],
     ) -> anyhow::Result<Image> {
         let top_left = Self::resize_image(data00);
         let bottom_left = Self::resize_image(data01);
@@ -341,25 +341,5 @@ impl App {
             Ok(image)
         });
         task.await?
-    }
-
-    async fn save_image(timestamp: DateTime<Utc>, data: Vec<u8>) -> anyhow::Result<Image> {
-        let image_path = Path::new(&format!(
-            "{}/{}.png",
-            App::IMAGE_DIR,
-            timestamp.format("%Y%m%d%H%M%S")
-        ))
-        .to_path_buf();
-        if fs::metadata(App::IMAGE_DIR).await.is_err() {
-            fs::create_dir(App::IMAGE_DIR).await?;
-        }
-        let mut file = fs::File::create(&image_path).await?;
-        file.write_all(&data).await?;
-
-        log::info!("Image saved: {}", image_path.display());
-        Ok(Image {
-            path: image_path,
-            timestamp,
-        })
     }
 }
