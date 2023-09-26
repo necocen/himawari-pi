@@ -264,6 +264,7 @@ impl Application for App {
 
 impl App {
     const IMAGE_DIR: &'static str = "./images";
+    const IMAGE_SIZE: u32 = 1080;
 
     fn get_images() -> Vec<Image> {
         match read_dir(Self::IMAGE_DIR) {
@@ -305,16 +306,22 @@ impl App {
         log::info!("Resize images");
         let images = images
             .into_par_iter()
-            .map(|image| image.resize(540, 540, FilterType::Lanczos3))
+            .map(|image| {
+                image.resize(
+                    App::IMAGE_SIZE / 2,
+                    App::IMAGE_SIZE / 2,
+                    FilterType::Lanczos3,
+                )
+            })
             .collect::<Vec<_>>();
 
         log::info!("Combine images");
-        let mut combined = RgbImage::new(1080, 1080);
-        images.into_iter().enumerate().for_each(|(i, image)| {
-            let x = 540 * (i / 2) as i64;
-            let y = 540 * (i % 2) as i64;
+        let mut combined = RgbImage::new(App::IMAGE_SIZE, App::IMAGE_SIZE);
+        for (i, image) in images.into_iter().enumerate() {
+            let x = (App::IMAGE_SIZE / 2) as i64 * (i / 2) as i64;
+            let y = (App::IMAGE_SIZE / 2) as i64 * (i % 2) as i64;
             imageops::replace(&mut combined, &image.to_rgb8(), x, y);
-        });
+        }
 
         log::info!("Save image");
         let image_path = Path::new(&format!(
