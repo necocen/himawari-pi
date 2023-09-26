@@ -19,6 +19,7 @@ use image::{
     imageops::{self, FilterType},
     DynamicImage, RgbImage,
 };
+use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use tokio::fs;
 
 use crate::{
@@ -294,22 +295,28 @@ impl App {
         }
     }
 
-    async fn resize_and_save_image(
-        id: DownloadId,
-        [data00, data01, data10, data11]: [Vec<u8>; 4],
-    ) -> anyhow::Result<Image> {
-        let top_left = Self::resize_image(data00);
-        let bottom_left = Self::resize_image(data01);
-        let top_right = Self::resize_image(data10);
-        let bottom_right = Self::resize_image(data11);
-        let (top_left, bottom_left, top_right, bottom_right) =
-            tokio::try_join!(top_left, bottom_left, top_right, bottom_right)?;
-        let mut combined = RgbImage::new(1080, 1080);
-        imageops::replace(&mut combined, &top_left.to_rgb8(), 0, 0);
-        imageops::replace(&mut combined, &bottom_left.to_rgb8(), 0, 540);
-        imageops::replace(&mut combined, &top_right.to_rgb8(), 540, 0);
-        imageops::replace(&mut combined, &bottom_right.to_rgb8(), 540, 540);
+    async fn resize_and_save_image(id: DownloadId, datas: [Vec<u8>; 4]) -> anyhow::Result<Image> {
+        log::info!("Load images");
+        let images = datas
+            .iter()
+            .map(|d| image::load_from_memory(d))
+            .collect::<Result<Vec<_>, _>>()?;
 
+        log::info!("Resize images");
+        let images = images
+            .into_par_iter()
+            .map(|image| image.resize(540, 540, FilterType::Lanczos3))
+            .collect::<Vec<_>>();
+
+        log::info!("Combine images");
+        let mut combined = RgbImage::new(1080, 1080);
+        images.into_iter().enumerate().for_each(|(i, image)| {
+            let x = 540 * (i / 2) as i64;
+            let y = 540 * (i % 2) as i64;
+            imageops::replace(&mut combined, &image.to_rgb8(), x, y);
+        });
+
+        log::info!("Save image");
         let image_path = Path::new(&format!(
             "{}/{}.png",
             App::IMAGE_DIR,
@@ -321,19 +328,10 @@ impl App {
         }
         combined.save(&image_path)?;
         log::info!("Image saved: {}", image_path.display());
+
         Ok(Image {
             path: image_path,
             id,
         })
-    }
-
-    async fn resize_image(data: Vec<u8>) -> anyhow::Result<DynamicImage> {
-        let task = tokio::task::spawn_blocking(move || -> anyhow::Result<DynamicImage> {
-            log::info!("Resizing image");
-            let image = image::load_from_memory(&data)?.resize(540, 540, FilterType::Lanczos3);
-            log::info!("Resized image");
-            Ok(image)
-        });
-        task.await?
     }
 }
