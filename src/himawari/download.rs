@@ -5,7 +5,15 @@ use futures::{future::try_join_all, stream::FuturesUnordered, FutureExt, StreamE
 use iced::{subscription, Subscription};
 use reqwest::{Client, Response};
 
-use crate::himawari::DownloadId;
+use super::{DownloadId, IMAGE_BASE_URL};
+
+#[derive(Debug, Clone)]
+pub enum Progress {
+    Started,
+    Advanced(f32),
+    Finished([Vec<u8>; 4]),
+    Failed(Arc<anyhow::Error>),
+}
 
 pub fn download_subscription(id: DownloadId) -> Subscription<(DownloadId, Progress)> {
     subscription::unfold(id, State::Ready(id), move |state| download(id, state))
@@ -84,14 +92,6 @@ async fn download(timestamp: DownloadId, state: State) -> ((DownloadId, Progress
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Progress {
-    Started,
-    Advanced(f32),
-    Finished([Vec<u8>; 4]),
-    Failed(Arc<anyhow::Error>),
-}
-
 enum State {
     Ready(DownloadId),
     Downloading([DownloadItem; 4]),
@@ -109,14 +109,12 @@ struct DownloadItem {
 
 async fn get_download_items(id: &DownloadId) -> anyhow::Result<[DownloadItem; 4]> {
     let client = Client::new();
-    let url =
-        id.0.format("https://himawari8.nict.go.jp/img/D531106/2d/550/%Y/%m/%d/%H%M%S")
-            .to_string();
+    let path = id.as_utc_datetime().format("/%Y/%m/%d/%H%M%S").to_string();
     let urls = [
-        format!("{url}_0_0.png"),
-        format!("{url}_0_1.png"),
-        format!("{url}_1_0.png"),
-        format!("{url}_1_1.png"),
+        format!("{IMAGE_BASE_URL}{path}_0_0.png"),
+        format!("{IMAGE_BASE_URL}{path}_0_1.png"),
+        format!("{IMAGE_BASE_URL}{path}_1_0.png"),
+        format!("{IMAGE_BASE_URL}{path}_1_1.png"),
     ];
     let futures = urls.map(|u| client.get(u).send());
     let responses = try_join_all(futures).await?;
