@@ -1,13 +1,12 @@
 use std::{
     fs::read_dir,
-    io::Cursor,
     iter,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use iced::{
     theme,
     widget::{
@@ -20,10 +19,10 @@ use image::{
     imageops::{self, FilterType},
     DynamicImage, RgbImage,
 };
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::fs;
 
 use crate::{
-    himawari::{self, DownloadInfo, Progress},
+    himawari::{self, DownloadId, Progress},
     modal::Modal,
 };
 
@@ -37,15 +36,12 @@ pub struct App {
 #[derive(Debug, Clone)]
 pub struct Image {
     path: PathBuf,
-    timestamp: DateTime<Utc>,
+    id: DownloadId,
 }
 
 impl Image {
     fn view(&self) -> Element<Message> {
-        let timestamp = self
-            .timestamp
-            .with_timezone(&chrono_tz::Asia::Tokyo)
-            .format("%Y-%m-%d %H:%M");
+        let timestamp = self.id.as_local_datetime().format("%Y-%m-%d %H:%M");
         button(text(timestamp).size(30))
             .on_press(Message::SelectImage(self.clone()))
             .style(theme::Button::Text)
@@ -55,21 +51,20 @@ impl Image {
 
 #[derive(Debug)]
 struct Download {
-    info: DownloadInfo,
+    id: DownloadId,
     state: DownloadState,
 }
 
 impl Download {
-    fn new(info: DownloadInfo) -> Self {
+    fn new(id: DownloadId) -> Self {
         Download {
-            info,
+            id,
             state: DownloadState::Starting,
         }
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        himawari::download_subscription(&self.info)
-            .map(|(ts, p)| Message::DownloadProgressed(ts, p))
+        himawari::download_subscription(self.id).map(|(id, p)| Message::DownloadProgressed(id, p))
     }
 }
 
@@ -84,8 +79,8 @@ enum DownloadState {
 #[derive(Debug, Clone)]
 pub enum Message {
     Fetch,
-    Download(DownloadInfo),
-    DownloadProgressed(DateTime<Utc>, Progress),
+    Download(DownloadId),
+    DownloadProgressed(DownloadId, Progress),
     DownloadCompleted(Image),
     ShowMenu,
     HideMenu,
@@ -139,7 +134,7 @@ impl Application for App {
                     .images
                     .iter()
                     .enumerate()
-                    .find(|(_, img)| img.timestamp == image.timestamp)
+                    .find(|(_, img)| img.id == image.id)
                     .map(|(i, image)| (i, iced_image::Handle::from_path(&image.path)));
                 Command::none()
             }
@@ -153,16 +148,12 @@ impl Application for App {
                     }
                 })
             }
-            Message::Download(info) => {
-                if let Some(image) = self
-                    .images
-                    .iter()
-                    .find(|image| image.timestamp == info.timestamp)
-                {
+            Message::Download(id) => {
+                if let Some(image) = self.images.iter().find(|image| image.id == id) {
                     log::debug!("Already downloaded: {}", image.path.display());
                     return Command::none();
                 }
-                self.download = Some(Download::new(info));
+                self.download = Some(Download::new(id));
                 Command::none()
             }
             Message::DownloadProgressed(_, Progress::Started) => {
@@ -286,11 +277,14 @@ impl App {
                             log::warn!("unexpected filename: {file_name}");
                             return None;
                         };
-                        let timestamp = timestamp.and_utc();
-                        Some(Image { path, timestamp })
+
+                        Some(Image {
+                            path,
+                            id: DownloadId::new(timestamp.and_utc()),
+                        })
                     })
                     .collect::<Vec<_>>();
-                images.sort_by(|i1, i2| i1.timestamp.cmp(&i2.timestamp));
+                images.sort_by(|i1, i2| i1.id.cmp(&i2.id));
                 images
             }
             Err(e) => {
@@ -301,7 +295,7 @@ impl App {
     }
 
     async fn resize_and_save_image(
-        timestamp: DateTime<Utc>,
+        id: DownloadId,
         [data00, data01, data10, data11]: [Vec<u8>; 4],
     ) -> anyhow::Result<Image> {
         let top_left = Self::resize_image(data00);
@@ -319,7 +313,7 @@ impl App {
         let image_path = Path::new(&format!(
             "{}/{}.png",
             App::IMAGE_DIR,
-            timestamp.format("%Y%m%d%H%M%S")
+            id.as_utc_datetime().format("%Y%m%d%H%M%S")
         ))
         .to_path_buf();
         if fs::metadata(App::IMAGE_DIR).await.is_err() {
@@ -329,7 +323,7 @@ impl App {
         log::info!("Image saved: {}", image_path.display());
         Ok(Image {
             path: image_path,
-            timestamp,
+            id,
         })
     }
 

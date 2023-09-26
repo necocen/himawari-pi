@@ -1,37 +1,29 @@
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
 use futures::{future::try_join_all, stream::FuturesUnordered, FutureExt, StreamExt};
 use iced::{subscription, Subscription};
 use reqwest::{Client, Response};
 
-use crate::himawari::DownloadInfo;
+use crate::himawari::DownloadId;
 
-pub fn download_subscription(
-    download_info: &DownloadInfo,
-) -> Subscription<(DateTime<Utc>, Progress)> {
-    let timestamp = download_info.timestamp;
-    subscription::unfold(
-        timestamp,
-        State::Ready(download_info.clone()),
-        move |state| download(timestamp, state),
-    )
+pub fn download_subscription(id: DownloadId) -> Subscription<(DownloadId, Progress)> {
+    subscription::unfold(id, State::Ready(id), move |state| download(id, state))
 }
 
-async fn download(timestamp: DateTime<Utc>, state: State) -> ((DateTime<Utc>, Progress), State) {
+async fn download(timestamp: DownloadId, state: State) -> ((DownloadId, Progress), State) {
     match state {
-        State::Ready(download_info) => {
-            let items = match get_download_items(&download_info).await {
+        State::Ready(id) => {
+            let items = match get_download_items(&id).await {
                 Ok(items) => items,
                 Err(e) => {
                     return ((timestamp, Progress::Failed(Arc::new(e))), State::Finished);
                 }
             };
             log::info!("Start downloading");
-            ((timestamp, Progress::Started), State::Downloading { items })
+            ((timestamp, Progress::Started), State::Downloading(items))
         }
-        State::Downloading { mut items } => {
+        State::Downloading(mut items) => {
             let first_result = {
                 // 未完了のダウンロードのchunkをFuturesUnorderedで並行実行し、最初に返ってきたものをnext()で取得する
                 items
@@ -82,7 +74,7 @@ async fn download(timestamp: DateTime<Utc>, state: State) -> ((DateTime<Utc>, Pr
             // );
             (
                 (timestamp, Progress::Advanced(percentage)),
-                State::Downloading { items },
+                State::Downloading(items),
             )
         }
         State::Finished => {
@@ -101,8 +93,8 @@ pub enum Progress {
 }
 
 enum State {
-    Ready(DownloadInfo),
-    Downloading { items: [DownloadItem; 4] },
+    Ready(DownloadId),
+    Downloading([DownloadItem; 4]),
     Finished,
 }
 
@@ -115,12 +107,11 @@ struct DownloadItem {
     is_finished: bool,
 }
 
-async fn get_download_items(download_info: &DownloadInfo) -> anyhow::Result<[DownloadItem; 4]> {
+async fn get_download_items(id: &DownloadId) -> anyhow::Result<[DownloadItem; 4]> {
     let client = Client::new();
-    let url = download_info
-        .timestamp
-        .format("https://himawari8.nict.go.jp/img/D531106/2d/550/%Y/%m/%d/%H%M%S")
-        .to_string();
+    let url =
+        id.0.format("https://himawari8.nict.go.jp/img/D531106/2d/550/%Y/%m/%d/%H%M%S")
+            .to_string();
     let urls = [
         format!("{url}_0_0.png"),
         format!("{url}_0_1.png"),

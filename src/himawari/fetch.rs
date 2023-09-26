@@ -1,9 +1,9 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use reqwest::Client;
 
-use super::DownloadInfo;
+use super::DownloadId;
 
-pub async fn fetch_download_info() -> anyhow::Result<DownloadInfo> {
+pub async fn fetch_download_info() -> anyhow::Result<DownloadId> {
     let client = Client::new();
     let latest_timestamp: LatestTimestamp = client
         .get("https://himawari8.nict.go.jp/img/FULL_24h/latest.json")
@@ -12,9 +12,7 @@ pub async fn fetch_download_info() -> anyhow::Result<DownloadInfo> {
         .json()
         .await?;
 
-    Ok(DownloadInfo {
-        timestamp: latest_timestamp.datetime()?,
-    })
+    Ok(DownloadId(latest_timestamp.datetime()?))
 }
 
 #[derive(serde::Deserialize)]
