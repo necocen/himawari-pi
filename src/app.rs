@@ -1,80 +1,32 @@
-use std::{
-    fs::read_dir,
-    iter,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs::read_dir, iter, path::Path, time::Duration};
 
 use chrono::NaiveDateTime;
 use iced::{
     theme,
-    widget::{
-        button, column, container, horizontal_space, image as iced_image, pick_list, row,
-        scrollable, text, Column, Space,
-    },
-    window, Application, Color, Command, Element, Length, Subscription,
+    widget::{button, column, container, image as iced_image, scrollable, text, Column, Space},
+    window, Alignment, Application, Command, Element, Length, Subscription,
 };
-use image::{
-    imageops::{self, FilterType},
-    DynamicImage, RgbImage,
-};
-use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use image::{imageops, RgbImage};
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use tokio::fs;
 
-use crate::{
-    himawari::{self, DownloadId, Progress},
+use crate::himawari::{self, DownloadId, Progress};
+
+use self::{
+    downloaded_image::DownloadedImage,
+    downloading_image::{DownloadState, DownloadingImage},
     modal::Modal,
 };
 
+mod downloaded_image;
+mod downloading_image;
+mod modal;
+
 pub struct App {
-    images: Vec<Image>,
-    download: Option<Download>,
+    images: Vec<DownloadedImage>,
+    download: Option<DownloadingImage>,
     current_image: Option<(usize, iced_image::Handle)>,
     shows_menu: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Image {
-    path: PathBuf,
-    id: DownloadId,
-}
-
-impl Image {
-    fn view(&self) -> Element<Message> {
-        let timestamp = self.id.as_local_datetime().format("%Y-%m-%d %H:%M");
-        button(text(timestamp).size(30))
-            .on_press(Message::SelectImage(self.clone()))
-            .style(theme::Button::Text)
-            .into()
-    }
-}
-
-#[derive(Debug)]
-struct Download {
-    id: DownloadId,
-    state: DownloadState,
-}
-
-impl Download {
-    fn new(id: DownloadId) -> Self {
-        Download {
-            id,
-            state: DownloadState::Starting,
-        }
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        himawari::download_subscription(self.id).map(|(id, p)| Message::DownloadProgressed(id, p))
-    }
-}
-
-#[derive(Debug)]
-enum DownloadState {
-    Starting,
-    Downloading { progress: f32 },
-    Finished,
-    Failed(Arc<anyhow::Error>),
 }
 
 #[derive(Debug, Clone)]
@@ -82,10 +34,10 @@ pub enum Message {
     Fetch,
     Download(DownloadId),
     DownloadProgressed(DownloadId, Progress),
-    DownloadCompleted(Image),
+    DownloadCompleted(DownloadedImage),
     ShowMenu,
     HideMenu,
-    SelectImage(Image),
+    SelectImage(DownloadedImage),
 }
 
 impl Application for App {
@@ -154,7 +106,7 @@ impl Application for App {
                     log::debug!("Already downloaded: {}", image.path.display());
                     return Command::none();
                 }
-                self.download = Some(Download::new(id));
+                self.download = Some(DownloadingImage::new(id));
                 Command::none()
             }
             Message::DownloadProgressed(_, Progress::Started) => {
@@ -211,36 +163,20 @@ impl Application for App {
         let Some((_, handle)) = &self.current_image else {
             return Space::new(Length::Fill, Length::Fill).into();
         };
-        let content = iced_image::Image::new(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fill);
-        let content = button(content)
-            .on_press(Message::ShowMenu)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(0)
-            .style(theme::Button::Text);
-        let images = scrollable(
-            Column::with_children(self.images.iter().rev().map(Image::view).collect()).spacing(10),
+
+        let content = button(
+            iced_image::Image::new(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
+        .on_press(Message::ShowMenu)
         .width(Length::Fill)
-        .direction(scrollable::Direction::Vertical(
-            scrollable::Properties::new().width(50).scroller_width(50),
-        ))
-        .height(300);
-        let modal = container(
-            column![
-                text("Sign Up").size(24),
-                column![images, button("Close").on_press(Message::HideMenu),].spacing(10)
-            ]
-            .spacing(20),
-        )
-        .width(700)
-        .padding(10)
-        .style(theme::Container::Transparent);
+        .height(Length::Fill)
+        .padding(0)
+        .style(theme::Button::Text);
 
         if self.shows_menu {
-            Modal::new(content, modal).into()
+            Modal::new(content, self.menu()).into()
         } else {
             content.into()
         }
@@ -251,7 +187,7 @@ impl Application for App {
         let progress = self
             .download
             .as_ref()
-            .map(Download::subscription)
+            .map(DownloadingImage::subscription)
             .into_iter();
 
         Subscription::batch(progress.chain(fetch))
@@ -266,7 +202,7 @@ impl App {
     const IMAGE_DIR: &'static str = "./images";
     const IMAGE_SIZE: u32 = 1080;
 
-    fn get_images() -> Vec<Image> {
+    fn get_images() -> Vec<DownloadedImage> {
         match read_dir(Self::IMAGE_DIR) {
             Ok(paths) => {
                 let mut images = paths
@@ -280,7 +216,7 @@ impl App {
                             return None;
                         };
 
-                        Some(Image {
+                        Some(DownloadedImage {
                             path,
                             id: DownloadId::new(timestamp.and_utc()),
                         })
@@ -296,7 +232,10 @@ impl App {
         }
     }
 
-    async fn resize_and_save_image(id: DownloadId, datas: [Vec<u8>; 4]) -> anyhow::Result<Image> {
+    async fn resize_and_save_image(
+        id: DownloadId,
+        datas: [Vec<u8>; 4],
+    ) -> anyhow::Result<DownloadedImage> {
         log::info!("Load images");
         let images = datas
             .iter()
@@ -310,7 +249,7 @@ impl App {
                 image.resize(
                     App::IMAGE_SIZE / 2,
                     App::IMAGE_SIZE / 2,
-                    FilterType::Lanczos3,
+                    imageops::FilterType::Lanczos3,
                 )
             })
             .collect::<Vec<_>>();
@@ -336,9 +275,42 @@ impl App {
         combined.save(&image_path)?;
         log::info!("Image saved: {}", image_path.display());
 
-        Ok(Image {
+        Ok(DownloadedImage {
             path: image_path,
             id,
         })
+    }
+
+    fn menu(&self) -> Element<Message> {
+        let images = scrollable(
+            Column::with_children(
+                self.download
+                    .iter()
+                    .map(DownloadingImage::view)
+                    .chain(self.images.iter().rev().map(DownloadedImage::view))
+                    .collect(),
+            )
+            .spacing(10),
+        )
+        .width(Length::Fill)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Properties::new().width(50).scroller_width(50),
+        ))
+        .height(300);
+
+        container(
+            column![
+                text("HIMAWARI 9").size(44),
+                images,
+                button(text("Close").size(30))
+                    .on_press(Message::HideMenu)
+                    .style(theme::Button::Text),
+            ]
+            .align_items(Alignment::Center)
+            .spacing(30),
+        )
+        .width(700)
+        .style(theme::Container::Transparent)
+        .into()
     }
 }

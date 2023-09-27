@@ -3,7 +3,6 @@ use iced::{Application, Settings};
 
 mod app;
 mod himawari;
-mod modal;
 
 fn main() -> iced::Result {
     env_logger::init();
