@@ -31,6 +31,7 @@ pub struct App {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    None,
     Fetch,
     Download(DownloadId),
     DownloadProgressed(DownloadId, Progress),
@@ -74,6 +75,7 @@ impl Application for App {
 
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
         match message {
+            Message::None => Command::none(),
             Message::ShowMenu => {
                 self.shows_menu = true;
                 Command::none()
@@ -95,9 +97,8 @@ impl Application for App {
                 Command::perform(himawari::fetch_download_info(), |result| match result {
                     Ok(info) => Message::Download(info),
                     Err(e) => {
-                        // TODO: 「無」のMessageを定義すべきなのか？
-                        log::error!("{e}");
-                        panic!("{e}")
+                        log::error!("failed to fetch image: {e}");
+                        Message::None
                     }
                 })
             }
@@ -129,7 +130,10 @@ impl Application for App {
                     App::resize_and_save_image(timestamp, data),
                     |result| match result {
                         Ok(image) => Message::DownloadCompleted(image),
-                        Err(e) => panic!("{e}"),
+                        Err(e) => {
+                            log::error!("failed to resize image: {e}");
+                            Message::None
+                        }
                     },
                 )
             }
