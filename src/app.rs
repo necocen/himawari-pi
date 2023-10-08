@@ -286,21 +286,25 @@ impl App {
     }
 
     fn menu(&self) -> Element<Message> {
-        let images = scrollable(
-            Column::with_children(
-                self.download
-                    .iter()
-                    .map(DownloadingImage::view)
-                    .chain(self.images.iter().rev().map(DownloadedImage::view))
-                    .collect(),
+        let current_index = self.current_image.as_ref().map(|(i, _)| i);
+        let images =
+            scrollable(
+                Column::with_children(
+                    self.download
+                        .iter()
+                        .map(DownloadingImage::view)
+                        .chain(self.images.iter().enumerate().rev().map(|(i, image)| {
+                            DownloadedImage::view(image, current_index == Some(&i))
+                        }))
+                        .collect(),
+                )
+                .spacing(10),
             )
-            .spacing(10),
-        )
-        .width(Length::Fill)
-        .direction(scrollable::Direction::Vertical(
-            scrollable::Properties::new().width(50).scroller_width(50),
-        ))
-        .height(300);
+            .width(Length::Fill)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Properties::new().width(50).scroller_width(50),
+            ))
+            .height(300);
 
         container(
             column![
