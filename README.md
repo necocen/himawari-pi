@@ -1,4 +1,4 @@
-# himawari-rs
+# himawari-pi
 
 気象衛星ひまわり9号が撮影した衛星画像をダウンロードして表示するソフトウェアです。
 [こちらのPost](https://twitter.com/sozoraemon/status/1687422013709938688)に影響されて作りました。
